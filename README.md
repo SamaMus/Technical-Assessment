@@ -1,89 +1,172 @@
 # EnergyMarket
 
-This is a direct transcription of the solution built in a separate chat
-(pasted to me in two parts: an initial draft, then a follow-up that fixed
-two violations found in review). Nothing here is new architecture from me —
-I only fixed a handful of Razor `@` symbols that were stripped by markdown
-rendering when the code was pasted (e.g. `AppAssembly="typeof(Program)..."`
-had lost its `@` prefix), since those are not valid Razor syntax as pasted
-and the file wouldn't render otherwise.
+Imports Spanish/Portuguese Day-Ahead electricity auction prices from OMIE's
+public `MARGINALPDBC` file, stores them, and exposes them via a REST API and
+a Blazor Server dashboard.
 
-## What this is
-
-A .NET 10 solution that imports the Spanish Day-Ahead electricity spot price
-(published by OMIE's public `MARGINALPDBC` file, no auth required), persists
-it in SQLite, exposes it via a REST API, and displays it in a Blazor Server
-frontend that only talks to the REST API (no direct DB/Domain/Infrastructure
-reference from Web).
+## Solution structure
 
 ```
-EnergyMarket/
-├── EnergyMarket.sln
+EnergyMarket.sln
 └── src/
-    ├── EnergyMarket.Domain/          entities, value objects, validator,
-    │                                  DayAheadPriceImportService (orchestration)
-    ├── EnergyMarket.Infrastructure/   EF Core (SQLite), OMIE file client + parser
-    ├── EnergyMarket.Api/              REST API + Quartz.NET scheduled job
-    └── EnergyMarket.Web/              Blazor Server, HttpClient-only consumer
+    ├── EnergyMarket.Domain          Entities, value objects, validation, import orchestration
+    ├── EnergyMarket.Infrastructure  EF Core (SQLite) + OMIE file client
+    ├── EnergyMarket.Api             REST API + Quartz.NET scheduled import job
+    └── EnergyMarket.Web             Blazor Server dashboard (HTTP client of the API only)
 ```
 
-## Verification checklist applied (from the source chat's own review pass)
+Four projects, no separate Worker process. Scheduling runs **inside** `EnergyMarket.Api`
+via Quartz.NET. `EnergyMarket.Web` has **no project reference** to `Domain`, `Infrastructure`,
+or `Api` — it talks to the API exclusively over HTTP using its own local DTOs.
 
-| # | Requirement | Status |
-|---|---|---|
-| 1 | Quartz.NET for scheduling (not `BackgroundService`/`PeriodicTimer`) | Fixed — `EnergyMarket.Api/Scheduling/ImportDayAheadPricesJob.cs` + `QuartzSchedulingExtensions.cs`, registered via `AddImportScheduling()` in `Program.cs`. |
-| 2 | `MARGINALPDBC` prices use `.` as decimal separator, not `,` | Fixed — `MarginalPdbcParser` uses `CultureInfo.InvariantCulture` with explicit `NumberStyles.AllowDecimalPoint \| NumberStyles.AllowLeadingSign`, not `es-ES`. |
-| 3 | `net10.0` everywhere, current (post-.NET 8) Blazor Web App template shape | Already correct in the source. |
-| 4 | `Web` has zero project references to Domain/Infrastructure/Api | Already correct — `EnergyMarket.Web.csproj` has no `ProjectReference`, only a resilience package. |
-| 5 | Proportionate project count (no separate Worker project) | Already correct — Quartz hosted inside `Api`. |
+## Prerequisites
 
-## Known gaps and uncertainty flags, stated in the source chat and preserved here
+- [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
+- No database server required — data is stored in a local SQLite file
+  (`energymarket.db`), created automatically on first run.
+- No API key or registration required — OMIE's public file endpoint needs no authentication.
 
-These are exactly the caveats given when this code was written — I have not
-been able to compile it (no .NET SDK or outbound network in this sandbox),
-so treat `dotnet build` as the actual first verification step, not a
-formality:
-
-- **The OMIE `MARGINALPDBC` parsing logic is the one piece to trust least
-  until verified.** It's written defensively (skips unparseable lines,
-  logs what it skips, rather than throwing) but was not checked against a
-  real downloaded file byte-for-byte in the original session. Download one
-  real `marginalpdbc_YYYYMMDD.1` file and confirm a sample price value
-  against the parsed `decimal` before relying on it.
-- **Quartz.NET DI registration syntax** (`AddQuartz`, `AddJob`, `AddTrigger`,
-  `AddQuartzHostedService`) is stable across Quartz 3.x historically, but was
-  not compiled against `net10.0` specifically in the original session. If
-  `ImportDayAheadPricesJob`'s constructor injection of the `Scoped`
-  `DayAheadPriceImportService` fails to resolve at runtime, swap to the
-  commented `IServiceScopeFactory` fallback in the same file.
-- **Package version numbers** (e.g. `10.0.0` for the EF Core/Http packages)
-  are placeholders reflecting "match the net10.0 major version" — if these
-  don't resolve on NuGet, run `dotnet add package <name>` without a version
-  pin and let NuGet resolve the latest compatible release.
-- **No test projects** were included in this pass, to keep the deliverable
-  focused on "builds and runs."
-- **No chart** — the Prices page shows a data table only, per the original
-  scope-control decision; a chart can be layered on later without touching
-  the architecture.
-- **appsettings ports**: `EnergyMarket.Web/appsettings.json` points
-  `Api:BaseUrl` at `https://localhost:5443/`. I added `launchSettings.json`
-  to both projects so `dotnet run` binds to that port by default — check the
-  actual bound URL printed by `dotnet run --project src/EnergyMarket.Api`
-  and update `Web`'s `appsettings.json` if it differs on your machine.
-
-## Running it
+Verify your SDK version:
 
 ```bash
+dotnet --version   # should report a 10.x.x version
+```
+
+## Getting the code building
+
+```bash
+git clone <this-repo>
+cd EnergyMarket
 dotnet restore
 dotnet build
-
-dotnet run --project src/EnergyMarket.Api     # note the actual bound URL
-dotnet run --project src/EnergyMarket.Web     # update its appsettings.json Api:BaseUrl if needed
 ```
 
-Seed data immediately (don't wait for the hourly Quartz trigger):
-```
-POST https://localhost:5443/api/imports?from=2026-07-15&to=2026-07-16&force=false
+If `dotnet build` fails on a specific package version (e.g. `Quartz.Extensions.Hosting`,
+`Microsoft.EntityFrameworkCore.Sqlite`, or `Microsoft.Extensions.Http.Resilience`), the
+version pins in the `.csproj` files were written before this exact package set was
+verified against `net10.0` in a live restore. Fix by re-adding the package without a
+version pin and letting NuGet resolve the latest compatible release:
+
+```bash
+dotnet add src/EnergyMarket.Infrastructure package Microsoft.EntityFrameworkCore.Sqlite
+dotnet add src/EnergyMarket.Api package Quartz.Extensions.Hosting
+dotnet add src/EnergyMarket.Web package Microsoft.Extensions.Http.Resilience
 ```
 
-Then open the Web app and search using Price Zone `1` (Spain) or `2` (Portugal).
+## Running the API
+
+```bash
+dotnet run --project src/EnergyMarket.Api
+```
+
+On first launch:
+- The SQLite schema is created automatically (`Database.EnsureCreated()` — see
+  **Known limitations** below for why this isn't a proper migration).
+- A Quartz.NET job runs immediately, then hourly, importing the last two days
+  (Madrid calendar time) of Day-Ahead prices from OMIE.
+- Swagger UI is available at `https://localhost:{port}/swagger` in the
+  Development environment — check your terminal output for the actual port.
+
+**Note the port printed in the console** — you'll need it for the next step.
+
+### Triggering an import manually
+
+Don't want to wait for the scheduled job? Trigger one directly:
+
+```bash
+curl -X POST "https://localhost:{port}/api/imports?from=2026-07-15&to=2026-07-16&force=false"
+```
+
+### Querying prices
+
+```bash
+# JSON
+curl "https://localhost:{port}/api/prices?priceZoneId=1&from=2026-07-15&to=2026-07-15"
+
+# CSV
+curl -H "Accept: text/plain" "https://localhost:{port}/api/prices?priceZoneId=1&from=2026-07-15&to=2026-07-15"
+```
+
+`priceZoneId`: `1` = Spain, `2` = Portugal (these are our own convention — OMIE's
+file has no zone identifier, just two fixed price columns per row).
+
+## Running the Web dashboard
+
+The Web project needs to know where the API is running. Before starting it,
+update `src/EnergyMarket.Web/appsettings.json` (or `appsettings.Development.json`)
+with the actual port the API printed on startup:
+
+```json
+{
+  "Api": { "BaseUrl": "https://localhost:5001/" }
+}
+```
+
+Then run it in a second terminal (with the API still running):
+
+```bash
+dotnet run --project src/EnergyMarket.Web
+```
+
+Open the printed URL in a browser, pick a price zone and date range, and click Search.
+
+## Configuration reference
+
+| Setting | Project | Purpose | Default |
+|---|---|---|---|
+| `ConnectionStrings:EnergyMarket` | Api | SQLite connection string | `Data Source=energymarket.db` |
+| `Omie:BaseUrl` | Api (bound into Infrastructure) | OMIE file-download base URL | `https://www.omie.es/en/file-download` |
+| `Omie:TimeoutSeconds` | Api | HTTP timeout for OMIE requests | `30` |
+| `Api:BaseUrl` | Web | Where Web sends its HTTP requests | *(must be set manually — see above)* |
+
+No secrets are required anywhere in this solution — OMIE's public file endpoint
+and the local SQLite file need no credentials.
+
+## Scheduling
+
+Handled entirely by Quartz.NET, registered in `EnergyMarket.Api/Scheduling/QuartzSchedulingExtensions.cs`:
+
+- One job (`ImportDayAheadPricesJob`), one trigger, firing immediately on startup
+  and then every hour.
+- Each run imports "yesterday and today" (Madrid calendar dates) and skips a
+  date/zone combination that's already fully imported, unless triggered with `force=true`
+  via the manual `/api/imports` endpoint.
+
+## Known limitations (deliberate, not oversights)
+
+- **`Database.EnsureCreated()` instead of EF Core migrations.** This gets the
+  app running immediately with zero setup steps, but it means there's no
+  migration history. Before any real deployment, replace this with
+  `dotnet ef migrations add InitialCreate` (run from the solution root,
+  `--project src/EnergyMarket.Infrastructure --startup-project src/EnergyMarket.Api`)
+  and call `Database.Migrate()` instead.
+- **`MARGINALPDBC` parsing is defensive but not exhaustively verified against every
+  historical file variant.** The parser skips and logs (at Debug level) any line
+  it can't parse rather than throwing, so a malformed or unexpected row won't
+  crash an import — but if an entire day imports as empty, check the application
+  logs first; the raw file format may differ from what's assumed in
+  `MarginalPdbcParser.cs`.
+- **No automated tests included in this version** — the previous design pass
+  covered unit/integration tests for each layer (Domain validation rules,
+  repository upsert/idempotency behavior, OMIE parsing edge cases, API status
+  codes); they were trimmed here to prioritize a buildable, runnable solution
+  first. Re-adding them is a natural next step.
+- **No chart/visualization on the dashboard** — the Prices page shows a plain
+  data table only; charting was deliberately left out to keep the Blazor
+  project's dependency footprint minimal (see `EnergyMarket.Web.csproj`).
+
+## Architecture at a glance
+
+- **Domain** — no dependencies on EF Core, HTTP, or any external package.
+  Contains `DayAheadPrice`/`PriceZone` entities, `MarketPeriod`/`DateRange`
+  value objects, validation rules, and `DayAheadPriceImportService`, which
+  orchestrates the whole import workflow against interfaces only.
+- **Infrastructure** — implements those interfaces: `OmieMarginalPricesClient`
+  (HTTP + file parsing, isolated from Domain) and `DayAheadPriceRepository`
+  (EF Core + SQLite, isolated from Domain).
+- **Api** — the only project that talks to both Domain and Infrastructure. Hosts
+  the REST endpoints and the Quartz.NET scheduled job. Converts UTC to CET at
+  the response boundary using `TimeZoneInfo` (DST-safe, no manual hour math).
+- **Web** — a pure HTTP client of the Api project. No compile-time visibility
+  into Domain, Infrastructure, or Api's internals — only a typed `HttpClient`
+  and its own local response DTOs.
