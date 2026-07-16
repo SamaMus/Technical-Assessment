@@ -1,6 +1,6 @@
 # EnergyMarket
 
-Imports Spanish/Portuguese Day-Ahead electricity auction prices from OMIE's
+Imports Spanish Day-Ahead electricity auction prices from OMIE's
 public `MARGINALPDBC` file, stores them, and exposes them via a REST API and
 a Blazor Server dashboard.
 
@@ -170,3 +170,4 @@ Handled entirely by Quartz.NET, registered in `EnergyMarket.Api/Scheduling/Quart
 - **Web** — a pure HTTP client of the Api project. No compile-time visibility
   into Domain, Infrastructure, or Api's internals — only a typed `HttpClient`
   and its own local response DTOs.
+# Link to the AI Chat: https://claude.ai/share/bbbaf6d7-58d9-4d2a-9472-43f22c8ae65d
